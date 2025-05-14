@@ -99,7 +99,6 @@ impl Renderer {
         scene: &Scene,
         device: &Device,
         queue: &Queue,
-        encoder: &mut CommandEncoder,
         render_pass: &mut wgpu::RenderPass,
         render_size: &RenderSize,
         view: &TextureView,
@@ -109,11 +108,12 @@ impl Renderer {
         // buffer fills.
         self.programs
             .prepare(device, queue, &scene.alphas, render_size);
+        let mut encoder = device.create_command_encoder(&Default::default());
         let mut junk = RendererJunk {
             programs: &mut self.programs,
             device,
             queue,
-            encoder,
+            encoder: &mut encoder,
             view,
         };
 
