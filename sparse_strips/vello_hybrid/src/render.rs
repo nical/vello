@@ -93,6 +93,32 @@ impl Renderer {
 
         self.scheduler.do_scene(&mut junk, scene)
     }
+
+    pub fn render_in(
+        &mut self,
+        scene: &Scene,
+        device: &Device,
+        queue: &Queue,
+        encoder: &mut CommandEncoder,
+        render_pass: &mut wgpu::RenderPass,
+        render_size: &RenderSize,
+        view: &TextureView,
+    ) -> Result<(), RenderError> {
+        // TODO: For the time being, we upload the entire alpha buffer as one big chunk. As a future
+        // refinement, we could have a bounded alpha buffer, and break draws when the alpha
+        // buffer fills.
+        self.programs
+            .prepare(device, queue, &scene.alphas, render_size);
+        let mut junk = RendererJunk {
+            programs: &mut self.programs,
+            device,
+            queue,
+            encoder,
+            view,
+        };
+
+        self.scheduler.do_scene_in(&mut junk, scene, render_pass)
+    }
 }
 
 /// Defines the GPU resources and pipelines for rendering.
@@ -734,6 +760,22 @@ impl RendererJunk<'_> {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
+        render_pass.set_pipeline(&self.programs.strip_pipeline);
+        render_pass.set_bind_group(0, &self.programs.resources.slot_bind_groups[ix], &[]);
+        render_pass.set_vertex_buffer(0, self.programs.resources.strips_buffer.slice(..));
+        render_pass.draw(0..4, 0..u32::try_from(strips.len()).unwrap());
+    }
+
+    pub(crate) fn do_strip_render_pass_in(
+        &mut self,
+        strips: &[GpuStrip],
+        ix: usize,
+        render_pass: &mut wgpu::RenderPass,
+    ) {
+        // TODO: We currently allocate a new strips buffer for each render pass. A more efficient
+        // approach would be to re-use buffers or slices of a larger buffer.
+        self.programs.upload_strips(self.device, self.queue, strips);
+
         render_pass.set_pipeline(&self.programs.strip_pipeline);
         render_pass.set_bind_group(0, &self.programs.resources.slot_bind_groups[ix], &[]);
         render_pass.set_vertex_buffer(0, self.programs.resources.strips_buffer.slice(..));

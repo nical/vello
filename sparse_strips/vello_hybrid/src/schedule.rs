@@ -44,7 +44,7 @@
 //! │ ───                ────    │  /     /       /     /     │       ──────────────       │
 //! │                  ──        │ /     /       /     /      │───────                     │
 //! └────────────────────────────└────────────────────────────└────────────────────────────┘
-//!                                                                                         
+//!
 //! How the scene is scheduled into rounds and draw calls are shown below:
 //!
 //! ### Round 0
@@ -280,6 +280,48 @@ impl Scheduler {
         Ok(())
     }
 
+    pub fn do_scene_in(
+        &mut self,
+        junk: &mut RendererJunk<'_>,
+        scene: &Scene,
+        render_pass: &mut wgpu::RenderPass,
+    ) -> Result<(), RenderError> {
+        let mut tile_state = mem::take(&mut self.tile_state);
+        let wide_tiles_per_row = (scene.width).div_ceil(WideTile::WIDTH);
+        let wide_tiles_per_col = (scene.height).div_ceil(Tile::HEIGHT);
+
+        // Left to right, top to bottom iteration over wide tiles.
+        for wide_tile_row in 0..wide_tiles_per_col {
+            for wide_tile_col in 0..wide_tiles_per_row {
+                let wide_tile_idx = usize::from(wide_tile_row * wide_tiles_per_row + wide_tile_col);
+                let wide_tile = &scene.wide.tiles[wide_tile_idx];
+                let wide_tile_x = wide_tile_col * WideTile::WIDTH;
+                let wide_tile_y = wide_tile_row * Tile::HEIGHT;
+                self.do_tile(junk, wide_tile_x, wide_tile_y, wide_tile, &mut tile_state)?;
+            }
+        }
+        while !self.rounds_queue.is_empty() {
+            self.flush_in(junk, render_pass);
+        }
+
+        // Restore state to reuse allocations.
+        self.round = 0;
+        self.tile_state = tile_state;
+        self.tile_state.stack.clear();
+        debug_assert!(self.clear[0].is_empty(), "clear has not reset");
+        debug_assert!(self.clear[1].is_empty(), "clear has not reset");
+        #[cfg(debug_assertions)]
+        {
+            for i in 0..self.total_slots {
+                debug_assert!(self.free[0].contains(&i), "free[0] is missing slot {}", i);
+                debug_assert!(self.free[1].contains(&i), "free[1] is missing slot {}", i);
+            }
+        }
+        debug_assert!(self.rounds_queue.is_empty(), "rounds_queue is not empty");
+
+        Ok(())
+    }
+
     /// Flush one round.
     ///
     /// The rounds queue must not be empty.
@@ -307,6 +349,37 @@ impl Scheduler {
                 }
             };
             junk.do_strip_render_pass(&draw.0, i, load);
+        }
+        for i in 0..2 {
+            self.free[i].extend(&round.free[i]);
+        }
+        self.round += 1;
+    }
+
+    fn flush_in(&mut self, junk: &mut RendererJunk<'_>, render_pass: &mut wgpu::RenderPass) {
+        let round = self.rounds_queue.pop_front().unwrap();
+        for (i, draw) in round.draws.iter().enumerate() {
+            if draw.0.is_empty() {
+                continue;
+            }
+
+            let load = {
+                if i == 2 {
+                    // We're rendering to the view, don't clear.
+                    wgpu::LoadOp::Load
+                } else if self.clear[i].len() + self.free[i].len() == self.total_slots {
+                    // All slots are either unoccupied or need to be cleared.
+                    // Simply clear the slots via a load operation.
+                    self.clear[i].clear();
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                } else {
+                    // Some slots need to be preserved, so only clear the dirty slots.
+                    junk.do_clear_slots_render_pass(i, self.clear[i].as_slice());
+                    self.clear[i].clear();
+                    wgpu::LoadOp::Load
+                }
+            };
+            junk.do_strip_render_pass_in(&draw.0, i, render_pass);
         }
         for i in 0..2 {
             self.free[i].extend(&round.free[i]);
